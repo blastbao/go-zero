@@ -52,6 +52,7 @@ func newCollection(collection *mgo.Collection, brk breaker.Breaker) Collection {
 }
 
 func (c *decoratedCollection) Find(query interface{}) Query {
+
 	promise, err := c.brk.Allow()
 	if err != nil {
 		return rejectedQuery{}

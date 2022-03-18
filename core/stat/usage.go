@@ -18,6 +18,8 @@ const (
 	beta = 0.95
 )
 
+
+// cpu 使用率(滑动平均值)
 var cpuUsage int64
 
 func init() {
@@ -31,10 +33,14 @@ func init() {
 			select {
 			case <-cpuTicker.C:
 				threading.RunSafe(func() {
+					// 当前使用率
 					curUsage := internal.RefreshCpu()
+					// 上次使用率
 					prevUsage := atomic.LoadInt64(&cpuUsage)
 					// cpu = cpuᵗ⁻¹ * beta + cpuᵗ * (1 - beta)
+					// 滑动平均算法
 					usage := int64(float64(prevUsage)*beta + float64(curUsage)*(1-beta))
+					// 使用率
 					atomic.StoreInt64(&cpuUsage, usage)
 				})
 			case <-allTicker.C:

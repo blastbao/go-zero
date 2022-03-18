@@ -10,8 +10,8 @@ import (
 
 const (
 	// 250ms for bucket duration
-	window     = time.Second * 10
-	buckets    = 40
+	window     = time.Second * 10	// 10s
+	buckets    = 40					// 40 个桶
 	k          = 1.5
 	protection = 5
 )
@@ -25,28 +25,43 @@ type googleBreaker struct {
 }
 
 func newGoogleBreaker() *googleBreaker {
+
+	// 把 10 秒均分为 40 个桶，每个 400ms
 	bucketDuration := time.Duration(int64(window) / int64(buckets))
+
+	// 根据 桶总数(40) 和 每个桶大小(10s) 创建滑动窗口
 	st := collection.NewRollingWindow(buckets, bucketDuration)
+
+	// 初始化
 	return &googleBreaker{
 		stat:  st,
 		k:     k,
-		proba: mathx.NewProba(),
+		proba: mathx.NewProba(),	// 概率生成器
 	}
 }
 
 func (b *googleBreaker) accept() error {
+
+	// 成功数、总数
 	accepts, total := b.history()
+
+	// 成功数 * weight
 	weightedAccepts := b.k * float64(accepts)
+
 	// https://landing.google.com/sre/sre-book/chapters/handling-overload/#eq2101
+	//
+	// 失败率
 	dropRatio := math.Max(0, (float64(total-protection)-weightedAccepts)/float64(total+1))
+
+	// 没有失败，则返回 accept
 	if dropRatio <= 0 {
 		return nil
 	}
 
+	// 如果失败率为 5% ，那么就丢弃 5% 的请求(随机)，其余请求是接受的。
 	if b.proba.TrueOnProba(dropRatio) {
 		return ErrServiceUnavailable
 	}
-
 	return nil
 }
 

@@ -22,31 +22,47 @@ const (
 var ErrServiceUnavailable = errors.New("circuit breaker is open")
 
 type (
+
+
 	// Acceptable is the func to check if the error can be accepted.
+	//
+	// 是否需要被熔断
 	Acceptable func(err error) bool
 
 	// A Breaker represents a circuit breaker.
 	Breaker interface {
+
 		// Name returns the name of the Breaker.
+		//
+		// 名称
 		Name() string
 
 		// Allow checks if the request is allowed.
 		// If allowed, a promise will be returned, the caller needs to call promise.Accept()
 		// on success, or call promise.Reject() on failure.
 		// If not allow, ErrServiceUnavailable will be returned.
+		//
+		// 手动挡
 		Allow() (Promise, error)
 
 		// Do runs the given request if the Breaker accepts it.
 		// Do returns an error instantly if the Breaker rejects the request.
 		// If a panic occurs in the request, the Breaker handles it as an error
 		// and causes the same panic again.
+		//
+		// 自动挡
 		Do(req func() error) error
+
 
 		// DoWithAcceptable runs the given request if the Breaker accepts it.
 		// DoWithAcceptable returns an error instantly if the Breaker rejects the request.
 		// If a panic occurs in the request, the Breaker handles it as an error
 		// and causes the same panic again.
 		// acceptable checks if it's a successful call, even if the err is not nil.
+		//
+		// 如果 cb 拒绝直接报错
+		// 如果 panic 则 throw
+		// 支持传入 acceptable 识别错误是否需要被熔断
 		DoWithAcceptable(req func() error, acceptable Acceptable) error
 
 		// DoWithFallback runs the given request if the Breaker accepts it.
@@ -63,10 +79,15 @@ type (
 		DoWithFallbackAcceptable(req func() error, fallback func(err error) error, acceptable Acceptable) error
 	}
 
+
 	// Option defines the method to customize a Breaker.
+	//
+	// 熔断配置
 	Option func(breaker *circuitBreaker)
 
 	// Promise interface defines the callbacks that returned by Breaker.Allow.
+	//
+	//
 	Promise interface {
 		// Accept tells the Breaker that the call is successful.
 		Accept()
@@ -74,14 +95,16 @@ type (
 		Reject(reason string)
 	}
 
+	//
 	internalPromise interface {
 		Accept()
 		Reject()
 	}
 
+	// 熔断器
 	circuitBreaker struct {
-		name string
-		throttle
+		name string	// 名称
+		throttle	//
 	}
 
 	internalThrottle interface {
@@ -98,15 +121,17 @@ type (
 // NewBreaker returns a Breaker object.
 // opts can be used to customize the Breaker.
 func NewBreaker(opts ...Option) Breaker {
+	// 初始化
 	var b circuitBreaker
 	for _, opt := range opts {
 		opt(&b)
 	}
+	// 随机名称
 	if len(b.name) == 0 {
 		b.name = stringx.Rand()
 	}
+	// 节流器
 	b.throttle = newLoggedThrottle(b.name, newGoogleBreaker())
-
 	return &b
 }
 
@@ -147,9 +172,9 @@ func defaultAcceptable(err error) bool {
 }
 
 type loggedThrottle struct {
-	name string
+	name string				// 熔断器名称
 	internalThrottle
-	errWin *errorWindow
+	errWin *errorWindow		// 统计窗口
 }
 
 func newLoggedThrottle(name string, t internalThrottle) loggedThrottle {
@@ -218,8 +243,8 @@ func (ew *errorWindow) String() string {
 }
 
 type promiseWithReason struct {
-	promise internalPromise
-	errWin  *errorWindow
+	promise internalPromise		//
+	errWin  *errorWindow		// 统计窗口
 }
 
 func (p promiseWithReason) Accept() {
