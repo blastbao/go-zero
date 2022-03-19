@@ -41,7 +41,6 @@ func newGoogleBreaker() *googleBreaker {
 }
 
 func (b *googleBreaker) accept() error {
-
 	// 成功数、总数
 	accepts, total := b.history()
 
@@ -62,6 +61,7 @@ func (b *googleBreaker) accept() error {
 	if b.proba.TrueOnProba(dropRatio) {
 		return ErrServiceUnavailable
 	}
+
 	return nil
 }
 

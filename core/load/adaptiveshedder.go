@@ -45,16 +45,24 @@ var (
 type (
 	// A Promise interface is returned by Shedder.Allow to let callers tell
 	// whether the processing request is successful or not.
+	// 回调函数
 	Promise interface {
 		// Pass lets the caller tell that the call is successful.
+		// 请求成功时回调此函数
 		Pass()
 		// Fail lets the caller tell that the call is failed.
+		// 请求失败时回调此函数
 		Fail()
 	}
 
 	// Shedder is the interface that wraps the Allow method.
+	// 降载接口
 	Shedder interface {
 		// Allow returns the Promise if allowed, otherwise ErrServiceOverloaded.
+		//
+		// 降载检查
+		// 1. 允许调用，需手动执行 Promise.accept()/reject()上报实际执行任务结构
+		// 2. 拒绝调用，将会直接返回 err: 服务过载错误 ErrServiceOverloaded
 		Allow() (Promise, error)
 	}
 
@@ -71,6 +79,18 @@ type (
 		// cpu 负载临界值
 		cpuThreshold int64
 	}
+
+
+	// 主要包含三类属性
+	//	cpu 负载阈值：
+	//		超过此值意味着 cpu 处于高负载状态。
+	//	冷却期：
+	//		假如服务之前被降载过，那么将进入冷却期，目的在于防止降载过程中负载还未降下来立马加压导致来回抖动。
+	//		因为降低负载需要一定的时间，处于冷却期内应该继续检查并发数是否超过限制，超过限制则继续丢弃请求。
+	//	并发数：
+	//		当前正在处理的并发数，当前正在处理的并发平均数，以及最近一段内的请求数与响应时间，
+	//		目的是为了计算当前正在处理的并发数是否大于系统可承载的最大并发数。
+	//
 
 	// 自适应降载结构体，需实现 Shedder 接口
 	adaptiveShedder struct {
@@ -179,7 +199,7 @@ func (as *adaptiveShedder) Allow() (Promise, error) {
 
 // 如何得到正在处理的并发数与平均并发数呢？
 // 当前正在的处理并发数统计其实非常简单，每次允许请求时并发数 +1，请求完成后通过 promise 对象回调-1 即可，
-// 并利用滑动平均算法求解平均并发数即可。
+// 平均并发数利用滑动平均算法求解即可。
 func (as *adaptiveShedder) addFlying(delta int64) {
 	flying := atomic.AddInt64(&as.flying, delta)
 	// update avgFlying when the request is finished.
@@ -198,7 +218,7 @@ func (as *adaptiveShedder) addFlying(delta int64) {
 }
 
 
-// 检查当前正在处理的并发数
+// 检查当前正在处理的并发数是否过高（高吞吐）
 //
 // 一旦 当前处理的并发数 > 并发数承载上限 则进入降载状态。
 //
@@ -208,6 +228,7 @@ func (as *adaptiveShedder) addFlying(delta int64) {
 // 为什么这里要加自旋锁呢？
 // 因为并发处理过程中，可以不阻塞其他的 goroutine 执行任务，采用无锁并发提高性能。
 //
+//
 func (as *adaptiveShedder) highThru() bool {
 	as.avgFlyingLock.Lock()
 	// 获取滑动平均值，每次请求结束后更新
@@ -215,6 +236,7 @@ func (as *adaptiveShedder) highThru() bool {
 	as.avgFlyingLock.Unlock()
 	// 系统此时最大并发数
 	maxFlight := as.maxFlight()
+
 	// 正在处理的并发数和平均并发数是否大于系统的最大并发数
 	return int64(avgFlying) > maxFlight && atomic.LoadInt64(&as.flying) > maxFlight
 }
@@ -232,19 +254,29 @@ func (as *adaptiveShedder) maxFlight() int64 {
 	// minRT = min average response time in milliseconds
 	// maxQPS * minRT / milliseconds_per_second
 	//
-	// as.maxPass()*as.windows ---- 每个桶最大的qps * 1s内包含桶的数量
+	// as.maxPass()*as.windows ---- 每个桶最大的 qps * 1s 内包含桶的数量
 	// as.minRt()/1e3 ---- 窗口所有桶中最小的平均响应时间 / 1000ms 这里是为了转换成秒
+
+	// [重要]
+	//
+	// 遍历 buckets ，得到最大请求计数，根据 bucket duration ，便计算出最大 QPS 。
+	// 遍历 buckets ，得到最小的 avg rtt 。
+	//
+	// 如果 MaxQPS = 1000 ，MinRtt = 0.5s ，那么意味着同时最多有 2000 个并发请求。
+	//
 	return int64(math.Max(1, float64(as.maxPass()*as.windows)*(as.minRt()/1e3)))
 }
 
-// 滑动时间窗口内有多个桶
-// 找到请求数最多的那个
-// 每个桶占用的时间为 internal ms
-// qps指的是1s内的请求数，qps: maxPass * time.Second/internal
+
+
+// 滑动时间窗口内有多个桶，找到请求总数最多的那个桶，根据 bucket duration ，就能够得到最大 QPS 。
+//
+// 每个桶占的时间为 internal ms ，qps 指的是 1s 内的请求数，qps: maxPass * time.Second/internal
 func (as *adaptiveShedder) maxPass() int64 {
 	var result float64 = 1
 
-	// 当前时间窗口内请求数最多的桶
+
+	// 遍历所有 buckets ，获取最大 Count 。
 	as.passCounter.Reduce(func(b *collection.Bucket) {
 		if b.Sum > result {
 			result = b.Sum
@@ -258,11 +290,15 @@ func (as *adaptiveShedder) maxPass() int64 {
 // 滑动时间窗口内有多个桶
 // 计算最小的平均响应时间
 // 因为需要计算近一段时间内系统能够处理的最大并发数
+//
+//
 func (as *adaptiveShedder) minRt() float64 {
 
 	// 默认为1000ms
 	result := defaultMinRt
 
+
+	// 遍历所有 buckets ，获取最小的 avg rtt 。
 	as.rtCounter.Reduce(func(b *collection.Bucket) {
 		if b.Count <= 0 {
 			return
@@ -284,12 +320,17 @@ func (as *adaptiveShedder) shouldDrop() bool {
 	// 当前 cpu 负载超过阈值
 	// 服务处于冷却期内应该继续检查负载并尝试丢弃请求
 	if as.systemOverloaded() || as.stillHot() {
+
 		// 检查正在处理的并发是否超出当前可承载的最大并发数，超出则丢弃请求
 		if as.highThru() {
+
+			//
 			flying := atomic.LoadInt64(&as.flying)
+
 			as.avgFlyingLock.Lock()
 			avgFlying := as.avgFlying
 			as.avgFlyingLock.Unlock()
+
 			msg := fmt.Sprintf(
 				"dropreq, cpu: %d, maxPass: %d, minRt: %.2f, hot: %t, flying: %d, avgFlying: %.2f",
 				stat.CpuUsage(), as.maxPass(), as.minRt(), as.stillHot(), flying, avgFlying)
@@ -363,17 +404,22 @@ func WithWindow(window time.Duration) ShedderOption {
 }
 
 type promise struct {
+	// 请求开始时间，用于统计请求处理耗时
 	start   time.Duration
 	shedder *adaptiveShedder
 }
 
 func (p *promise) Fail() {
+	// 请求结束，当前正在处理请求数-1
 	p.shedder.addFlying(-1)
 }
 
 func (p *promise) Pass() {
+	// 响应时间，单位毫秒
 	rt := float64(timex.Since(p.start)) / float64(time.Millisecond)
+	// 请求结束，当前正在处理请求数-1
 	p.shedder.addFlying(-1)
+
 	p.shedder.rtCounter.Add(math.Ceil(rt))
 	p.shedder.passCounter.Add(1)
 }
